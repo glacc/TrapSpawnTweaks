@@ -1,15 +1,15 @@
 using BepInEx;
+using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
+using System;
 using System.Collections.Generic;
-using UnityEngine;
+using System.IO;
 using System.Reflection;
+using Unity.Collections.LowLevel.Unsafe;
+using UnityEngine;
 using static TMPro.SpriteAssetUtilities.TexturePacker_JsonArray;
 using static UnityEngine.Rendering.HighDefinition.ScalableSettingLevelParameter;
-using System;
-using Unity.Collections.LowLevel.Unsafe;
-using BepInEx.Configuration;
-using System.IO;
 
 namespace TrapSpawnTweaks
 {
@@ -32,6 +32,9 @@ namespace TrapSpawnTweaks
 		static float turretSpawnMultiplier = 1f;
 		static float spikeTrapSpawnMultiplier = 1f;
 
+		static bool limitNumberToSpawn = false;
+		static float maxNumberToSpawn = 100f;
+
 		static void LoadGlobalConfig()
 		{
 			//ConfigFile configFile = new ConfigFile(Path.Combine(Paths.ConfigPath, "TrapSpawnTweaks.cfg"), false);
@@ -44,6 +47,11 @@ namespace TrapSpawnTweaks
 			globalCfg.turretSpawnMultiplier = configFile.Bind(globalCfgSection, "Turret Spawn Multiplier", 1f);
 			globalCfg.spikeTrapSpawnMultiplier = configFile.Bind(globalCfgSection, "Spike Trap Spawn Multiplier", 1f);
 
+			ConfigEntry<bool> limitNumberToSpawnCfg = configFile.Bind(globalCfgSection, "Limit Number To Spawn", false, "(Experimental) Limits max spawns of each type of trap.");
+			ConfigEntry<float> maxNumberToSpawnCfg = configFile.Bind(globalCfgSection, "Max Number To Spawn", 100f);
+			limitNumberToSpawn = limitNumberToSpawnCfg.Value;
+			maxNumberToSpawn = maxNumberToSpawnCfg.Value;
+
 			landmineSpawnMultiplier = globalCfg.landmineSpawnMultiplier.Value;
 			turretSpawnMultiplier = globalCfg.turretSpawnMultiplier.Value;
 			spikeTrapSpawnMultiplier = globalCfg.spikeTrapSpawnMultiplier.Value;
@@ -53,6 +61,7 @@ namespace TrapSpawnTweaks
 
 		#endregion
 
+#if UnityExplorerScript
 		#region Script_For_Unity_Explorer
 
 		/* Code for listing spawnableMapObjects of each level in Unity Explorer: */
@@ -90,6 +99,7 @@ namespace TrapSpawnTweaks
 		}
 
 		#endregion
+#endif
 
 		public static TrapSpawnTweaks Instance { get; private set; } = null!;
 		internal new static ManualLogSource Logger { get; private set; } = null!;
@@ -102,6 +112,7 @@ namespace TrapSpawnTweaks
 
 		//static float numOfSpawnMultiplier = 0.4f;
 
+#if none
 		struct OriginalMapObjectSpawnData
 		{
 			public string levelName;
@@ -115,6 +126,34 @@ namespace TrapSpawnTweaks
 		}
 
 		static List<OriginalMapObjectSpawnData> origMapObjectSpawns = new List<OriginalMapObjectSpawnData>();
+#endif
+
+		static int clampResolution = 100;
+
+		static Keyframe[] ClampValues(AnimationCurve animationCurve, float multiplier)
+		{
+			List<Keyframe> newKeys = new List<Keyframe>();
+
+			float startVal = 0f;
+			float endVal = 1f;
+			int i = 0;
+			while (i < clampResolution)
+			{
+				float currentTime = startVal + (endVal - startVal) * (i / (float)clampResolution);
+
+				float currentValue = animationCurve.Evaluate(currentTime) * multiplier;
+				if (currentValue > maxNumberToSpawn)
+					currentValue = maxNumberToSpawn;
+
+				Keyframe keyframe = new Keyframe(currentTime, currentValue);
+				keyframe.tangentModeInternal = 2;
+				newKeys.Add(keyframe);
+
+				i++;
+			}
+
+			return newKeys.ToArray();
+		}
 
 		static bool mapDataSaved = false;
 
@@ -174,29 +213,36 @@ namespace TrapSpawnTweaks
 						//if (level.name == "EmbrionLevel" && spawnableMapObject.prefabToSpawn.name == spikeHazardName)
 						if (true)
 						{
-							Keyframe[] newKeys = new Keyframe[currKeys.Length];
-
-							k = 0;
-							while (k < currKeys.Length)
+							if (!limitNumberToSpawn)
 							{
-								//float newValue = currKeys[k].value * numOfSpawnMultiplier;
+								Keyframe[] newKeys = new Keyframe[currKeys.Length];
 
-								Keyframe origKey = currKeys[k];
-								Keyframe newKey = new Keyframe();
-								newKey.value = origKey.value * multiplier;
-								newKey.time = origKey.time;
-								newKey.inTangent = origKey.inTangent;
-								newKey.outTangent = origKey.outTangent;
-								newKey.inWeight = origKey.inWeight;
-								newKey.outWeight = origKey.outWeight;
-								newKey.weightedMode = origKey.weightedMode;
+								k = 0;
+								while (k < currKeys.Length)
+								{
+									//float newValue = currKeys[k].value * numOfSpawnMultiplier;
 
-								newKeys[k] = newKey;
+									Keyframe origKey = currKeys[k];
+									Keyframe newKey = new Keyframe();
+									newKey.value = origKey.value * multiplier;
+									newKey.time = origKey.time;
+									newKey.inTangent = origKey.inTangent;
+									newKey.outTangent = origKey.outTangent;
+									newKey.inWeight = origKey.inWeight;
+									newKey.outWeight = origKey.outWeight;
+									newKey.weightedMode = origKey.weightedMode;
 
-								k++;
+									newKeys[k] = newKey;
+
+									k++;
+								}
+
+								spawnableMapObject.numberToSpawn.keys = newKeys;
 							}
-
-							spawnableMapObject.numberToSpawn.keys = newKeys;
+							else
+							{
+								spawnableMapObject.numberToSpawn.keys = ClampValues(spawnableMapObject.numberToSpawn, multiplier);
+							}
 						}
 
 						j++;
@@ -206,6 +252,7 @@ namespace TrapSpawnTweaks
 
 					Logger.LogInfo(" - New Values:");
 
+					bool secondLargerThanMax = false;
 					j = 0;
 					while (j < level.spawnableMapObjects.Length)
 					{
@@ -215,7 +262,17 @@ namespace TrapSpawnTweaks
 						int k = 0;
 						while (k < spawnableMapObject.numberToSpawn.keys.Length)
 						{
-							Logger.LogInfo("       - [" + k + "]:" + spawnableMapObject.numberToSpawn.keys[k].value);
+							float newValue = spawnableMapObject.numberToSpawn.keys[k].value;
+
+							if (newValue < maxNumberToSpawn)
+								secondLargerThanMax = false;
+
+							if (!secondLargerThanMax)
+								Logger.LogInfo("       - [" + k + "]:" + newValue);
+
+							if (newValue >= maxNumberToSpawn)
+								secondLargerThanMax = true;
+
 							k++;
 						}
 
@@ -266,11 +323,20 @@ namespace TrapSpawnTweaks
 
 					if (true)
 					{
+						bool secondLargerThanMax = false;
 						int k = 0;
 						while (k < mapObject.numberToSpawn.keys.Length)
 						{
 							float val = mapObject.numberToSpawn.keys[k].value;
-							Logger.LogInfo("       - [" + k + "]: " + val);
+
+							if (val < maxNumberToSpawn)
+								secondLargerThanMax = false;
+
+							if (!secondLargerThanMax)
+								Logger.LogInfo("       - [" + k + "]:" + val);
+
+							if (val >= maxNumberToSpawn)
+								secondLargerThanMax = true;
 
 							k++;
 						}
